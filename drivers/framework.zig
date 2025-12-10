@@ -50,6 +50,7 @@ pub const sensor = struct {
     pub const MPU_6050 = @import("sensor/MPU-6050.zig").MPU_6050;
     pub const TLV493D = @import("sensor/TLV493D.zig").TLV493D;
     pub const TMP117 = @import("sensor/TMP117.zig").TMP117;
+    pub const AHT30 = @import("sensor/AHT30.zig").AHT30;
 };
 
 pub const stepper = struct {
@@ -224,6 +225,7 @@ test {
     _ = sensor.MPU_6050;
     _ = sensor.TLV493D;
     _ = sensor.TMP117;
+    _ = sensor.AHT30;
 
     _ = @import("stepper/common.zig");
     _ = stepper.A4988;
