@@ -31,20 +31,26 @@ pub const microzig_options: microzig.Options = .{
     },
     .logFn = usb_serial_jtag.logger.log,
     .interrupts = .{
-        .interrupt29 = .{ .c = radio.interrupt_handler },
-        .interrupt30 = .{ .c = RTOS.general_purpose_interrupt_handler },
-        .interrupt31 = .{ .naked = RTOS.yield_handler },
+        .interrupt29 = radio.interrupt_handler,
+        .interrupt30 = RTOS.general_purpose_interrupt_handler,
+        .interrupt31 = RTOS.yield_interrupt_handler,
     },
     .cpu = .{
         .interrupt_stack_size = 4096,
     },
+    .hal = .{
+        .radio = .{
+            .wifi = .{
+
+            },
+        },
+    },
 };
 
-var buffer: [50 * 1024]u8 = undefined;
 var rtos: RTOS = undefined;
 
 pub fn main() !void {
-    var heap_allocator: microzig.Allocator = .init_with_buffer(&buffer);
+    var heap_allocator: microzig.Allocator = .init_with_heap(4096);
     const gpa = heap_allocator.allocator();
     rtos.init(gpa);
 
@@ -53,18 +59,6 @@ pub fn main() !void {
 
     try radio.wifi.init();
     defer radio.wifi.deinit();
-
-    c.lwip_init();
-
-    var netif: c.netif = undefined;
-    _ = c.netif_add(&netif, @ptrCast(c.IP4_ADDR_ANY), @ptrCast(c.IP4_ADDR_ANY), @ptrCast(c.IP4_ADDR_ANY), null, netif_init, c.netif_input);
-    @memcpy(&netif.name, "e0");
-    c.netif_create_ip6_linklocal_address(&netif, 1);
-    netif.ip6_autoconfig_enabled = 1;
-    c.netif_set_status_callback(&netif, netif_status_callback);
-    c.netif_set_default(&netif);
-    c.netif_set_up(&netif);
-    _ = c.dhcp_start(&netif);
 
     try radio.wifi.apply(.{
         .sta = .{
@@ -75,38 +69,10 @@ pub fn main() !void {
     try radio.wifi.start();
     try radio.wifi.connect();
 
-    var connected: bool = false;
     var last_mem_show = hal.time.get_time_since_boot();
 
     while (true) {
         radio.tick();
-
-        const sta_state = radio.wifi.get_sta_state();
-        if (!connected and sta_state == .sta_connected) {
-            std.log.info("link up", .{});
-            c.netif_set_link_up(&netif);
-            connected = true;
-        } else if (connected and sta_state == .sta_disconnected) {
-            std.log.info("link down", .{});
-            c.netif_set_link_down(&netif);
-            connected = false;
-        }
-
-        while (radio.wifi.recv_packet(.sta)) |packet| {
-            defer packet.deinit();
-
-            const maybe_pbuf: ?*c.struct_pbuf = c.pbuf_alloc(c.PBUF_RAW, @intCast(packet.data.len), c.PBUF_POOL);
-            if (maybe_pbuf) |pbuf| {
-                _ = c.pbuf_take(pbuf, packet.data.ptr, @intCast(packet.data.len));
-                defer _ = c.pbuf_free(pbuf);
-
-                if (c.netif_input(pbuf, &netif) != c.ERR_OK) {
-                    std.log.warn("lwip netif input failed", .{});
-                }
-            }
-        }
-
-        c.sys_check_timeouts();
 
         const now = hal.time.get_time_since_boot();
         if (!now.diff(last_mem_show).less_than(.from_ms(1000))) {
@@ -175,7 +141,7 @@ fn netif_status_callback(netif_c: [*c]c.netif) callconv(.c) void {
 }
 
 export fn sys_now() callconv(.c) u32 {
-    return @truncate(hal.time.get_time_since_boot().to_us() * 1_000);
+    return @truncate(hal.time.get_time_since_boot().to_us() / 1_000);
 }
 
 export fn rand() callconv(.c) i32 {

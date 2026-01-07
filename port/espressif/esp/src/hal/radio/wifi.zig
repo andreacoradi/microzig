@@ -1,4 +1,5 @@
 const std = @import("std");
+const assert = std.debug.assert;
 const log = std.log.scoped(.esp_radio_wifi);
 
 const microzig = @import("microzig");
@@ -15,11 +16,14 @@ pub const InternalError = error{InternalError};
 var inited: bool = false;
 
 pub const Options = struct {
-    rx_queue_len: usize = 15,
-    tx_queue_len: usize = 15,
+    on_event: ?*const fn (e: Event) void = null,
+    on_packet_received: ?*const fn (interface: Interface, data: []const u8) void = null,
+    on_packet_transmitted: ?*const fn (interface: Interface, data: []const u8, status: bool) void = null,
 };
 
 pub fn init() InternalError!void {
+    export_symbols();
+
     if (inited) {
         @panic("wifi already initialized");
     }
@@ -37,13 +41,12 @@ pub fn init() InternalError!void {
     try c_result(c.esp_supplicant_init());
 
     try c_result(c.esp_wifi_set_tx_done_cb(tx_done_cb));
-
     try c_result(c.esp_wifi_internal_reg_rxcb(c.ESP_IF_WIFI_AP, recv_cb_ap));
     try c_result(c.esp_wifi_internal_reg_rxcb(c.ESP_IF_WIFI_STA, recv_cb_sta));
 
     {
         // TODO: config
-        const country_code: [3]u8 = .{ 'C', 'N', 0 };
+        const country_code: [3]u8 = .{ 'R', 'O', 0 };
         const country: c.wifi_country_t = .{
             .cc = country_code,
             .schan = 1,
@@ -342,7 +345,7 @@ pub fn disconnect() InternalError!void {
     try c_result(c.esp_wifi_disconnect_internal());
 }
 
-pub const Event = enum(i32) {
+pub const EventType = enum(i32) {
     /// Wi-Fi is ready for operation.
     WifiReady = 0,
     /// Scan operation has completed.
@@ -445,52 +448,154 @@ pub const Event = enum(i32) {
     StaNeighborRep,
 };
 
-export fn esp_event_post(
+pub const Event = union(EventType) {
+    /// Wi-Fi is ready for operation.
+    WifiReady,
+    /// Scan operation has completed.
+    ScanDone: c.wifi_event_sta_scan_done_t,
+    /// Station mode started.
+    StaStart,
+    /// Station mode stopped.
+    StaStop,
+    /// Station connected to a network.
+    StaConnected: c.wifi_event_sta_connected_t,
+    /// Station disconnected from a network.
+    StaDisconnected: c.wifi_event_sta_disconnected_t,
+    /// Station authentication mode changed.
+    StaAuthmodeChange: c.wifi_event_sta_authmode_change_t,
+
+    /// Station WPS succeeds in enrollee mode.
+    StaWpsErSuccess: c.wifi_event_sta_wps_er_success_t,
+    /// Station WPS fails in enrollee mode.
+    StaWpsErFailed,
+    /// Station WPS timeout in enrollee mode.
+    StaWpsErTimeout,
+    /// Station WPS pin code in enrollee mode.
+    StaWpsErPin: c.wifi_event_sta_wps_er_pin_t,
+    /// Station WPS overlap in enrollee mode.
+    StaWpsErPbcOverlap,
+
+    /// Soft-AP start.
+    ApStart,
+    /// Soft-AP stop.
+    ApStop,
+    /// A station connected to Soft-AP.
+    ApStaconnected: c.wifi_event_ap_staconnected_t,
+    /// A station disconnected from Soft-AP.
+    ApStadisconnected: c.wifi_event_ap_stadisconnected_t,
+    /// Received probe request packet in Soft-AP interface.
+    ApProbereqrecved: c.wifi_event_ap_probe_req_rx_t,
+
+    /// Received report of FTM procedure.
+    FtmReport: c.wifi_event_ftm_report_t,
+
+    /// AP's RSSI crossed configured threshold.
+    StaBssRssiLow: c.wifi_event_bss_rssi_low_t,
+    /// Status indication of Action Tx operation.
+    ActionTxStatus: c.wifi_event_action_tx_status_t,
+    /// Remain-on-Channel operation complete.
+    RocDone: c.wifi_event_roc_done_t,
+
+    /// Station beacon timeout.
+    StaBeaconTimeout,
+
+    /// Connectionless module wake interval has started.
+    ConnectionlessModuleWakeIntervalStart,
+
+    /// Soft-AP WPS succeeded in registrar mode.
+    ApWpsRgSuccess: c.wifi_event_ap_wps_rg_success_t,
+    /// Soft-AP WPS failed in registrar mode.
+    ApWpsRgFailed: c.wifi_event_ap_wps_rg_fail_reason_t,
+    /// Soft-AP WPS timed out in registrar mode.
+    ApWpsRgTimeout,
+    /// Soft-AP WPS pin code in registrar mode.
+    ApWpsRgPin: c.wifi_event_ap_wps_rg_pin_t,
+    /// Soft-AP WPS overlap in registrar mode.
+    ApWpsRgPbcOverlap,
+
+    /// iTWT setup.
+    ItwtSetup,
+    /// iTWT teardown.
+    ItwtTeardown,
+    /// iTWT probe.
+    ItwtProbe,
+    /// iTWT suspended.
+    ItwtSuspend,
+    /// TWT wakeup event.
+    TwtWakeup,
+    /// bTWT setup.
+    BtwtSetup,
+    /// bTWT teardown.
+    BtwtTeardown,
+
+    /// NAN (Neighbor Awareness Networking) discovery has started.
+    NanStarted,
+    /// NAN discovery has stopped.
+    NanStopped,
+    /// NAN service discovery match found.
+    // TODO: c.wifi_event_nan_svc_match_t
+    NanSvcMatch,
+    /// Replied to a NAN peer with service discovery match.
+    // TODO: c.wifi_event_nan_replied_t
+    NanReplied,
+    /// Received a follow-up message in NAN.
+    // TODO: c.wifi_event_nan_receive_t
+    NanReceive,
+    /// Received NDP (Neighbor Discovery Protocol) request from a NAN peer.
+    // TODO: c.wifi_event_ndp_indication_t
+    NdpIndication,
+    /// NDP confirm indication.
+    // TODO: c.wifi_event_ndp_confirm_t
+    NdpConfirm,
+    /// NAN datapath terminated indication.
+    // TODO: c.wifi_event_ndp_terminated_t
+    NdpTerminated,
+    /// Wi-Fi home channel change, doesn't occur when scanning.
+    HomeChannelChange: c.wifi_event_home_channel_change_t,
+
+    /// Received Neighbor Report response.
+    StaNeighborRep: c.wifi_event_neighbor_report_t,
+};
+
+const events_set_size = blk: {
+    var max_id = 0;
+    for (std.enums.values(EventType)) |event| {
+        max_id = @max(max_id, @intFromEnum(event));
+    }
+    break :blk max_id + 1;
+};
+
+var events: microzig.concurrency.AtomicStaticBitSet(events_set_size) = .{};
+
+fn esp_event_post(
     base: [*c]const u8,
     id: i32,
     data: ?*anyopaque,
     data_size: usize,
     ticks_to_wait: u32,
 ) callconv(.c) i32 {
-    _ = base; // autofix
-    _ = data; // autofix
-    _ = data_size; // autofix
-    _ = ticks_to_wait; // autofix
+    log.debug("esp_event_post {s} {} {?} {} {}", .{ base, id, data, data_size, ticks_to_wait });
 
-    const event: Event = @enumFromInt(id);
-    log.info("received event: {s}", .{@tagName(event)});
+    const event_type: EventType = @enumFromInt(id);
 
-    update_sta_state(event);
+    const event = switch (event_type) {
+        inline else => |tag| blk: {
+            const EventPayloadType = @FieldType(Event, @tagName(tag));
+            assert(data_size == @sizeOf(EventPayloadType));
+            const payload_ptr: *const EventPayloadType = @ptrCast(@alignCast(data));
+            break :blk @unionInit(Event, @tagName(tag), payload_ptr.*);
+        },
+    };
+
+    _ = events.set(@intCast(id));
+
+    if (wifi_options.on_event) |on_event|
+        on_event(event);
 
     return 0;
 }
 
 // TODO: ApState
-
-pub const StaState = enum {
-    none,
-    sta_started,
-    sta_connected,
-    sta_disconnected,
-    sta_stopped,
-};
-
-var sta_state: StaState = .none;
-
-fn update_sta_state(event: Event) void {
-    const new_sta_state: StaState = switch (event) {
-        .StaStart => .sta_started,
-        .StaConnected => .sta_connected,
-        .StaDisconnected => .sta_disconnected,
-        .StaStop => .sta_stopped,
-        else => return,
-    };
-    @atomicStore(StaState, &sta_state, new_sta_state, .unordered);
-}
-
-pub fn get_sta_state() StaState {
-    return @atomicLoad(StaState, &sta_state, .unordered);
-}
 
 pub const Interface = enum(u32) {
     ap = c.WIFI_IF_AP,
@@ -505,68 +610,31 @@ pub const Interface = enum(u32) {
     }
 };
 
-var packets_in_flight: usize = 0;
-
-pub fn send_packet(iface: Interface, data: []const u8) (error{TooManyPacketsInFlight} || InternalError)!void {
-    const pkts_in_flight = @atomicLoad(usize, &packets_in_flight, .acquire);
-    if (pkts_in_flight >= wifi_options.tx_queue_len) {
-        log.warn("too many packets in flight", .{});
-        return error.TooManyPacketsInFlight;
-    }
-    _ = @atomicRmw(usize, &packets_in_flight, .Add, 1, .monotonic);
-    errdefer _ = @atomicRmw(usize, &packets_in_flight, .Sub, 1, .monotonic);
-
+pub fn send_packet(iface: Interface, data: []const u8) InternalError!void {
     try c_result(c.esp_wifi_internal_tx(@intFromEnum(iface), @ptrCast(@constCast(data.ptr)), @intCast(data.len)));
 }
 
 fn tx_done_cb(
-    _: u8,
-    _: [*c]u8,
-    _: [*c]u16,
-    _: bool,
+    iface_idx: u8,
+    data_ptr: [*c]u8,
+    data_len: [*c]u16,
+    status: bool,
 ) callconv(.c) void {
-    log.debug("tx_done_cb", .{});
+    log.debug("tx_done_cb {} {?} {?} {}", .{ iface_idx, data_ptr, data_len, status });
 
-    if (packets_in_flight == 0) {
-        log.warn("ignoring tx_done_cb as there are no packets in flight", .{});
-        return;
-    }
+    const interface: Interface = @enumFromInt(iface_idx);
 
-    _ = @atomicRmw(usize, &packets_in_flight, .Sub, 1, .acq_rel);
-}
-
-/// Every packet buffer must be deinited by the user in the callback.
-pub const ReceivedPacket = struct {
-    data: []const u8,
-    eb: ?*anyopaque,
-
-    pub fn deinit(self: ReceivedPacket) void {
-        c.esp_wifi_internal_free_rx_buffer(self.eb);
-    }
-};
-
-var ap_rx_queue: SPSC_Queue(ReceivedPacket, wifi_options.rx_queue_len) = .empty;
-var sta_rx_queue: SPSC_Queue(ReceivedPacket, wifi_options.rx_queue_len) = .empty;
-
-pub fn recv_packet(comptime iface: Interface) ?ReceivedPacket {
-    return switch (iface) {
-        .ap => ap_rx_queue.dequeue(),
-        .sta => sta_rx_queue.dequeue(),
-    };
+    if (wifi_options.on_packet_transmitted) |on_packet_transmitted|
+        on_packet_transmitted(interface, data_ptr[0..data_len.*], status);
 }
 
 fn recv_cb_ap(buf: ?*anyopaque, len: u16, eb: ?*anyopaque) callconv(.c) c.esp_err_t {
     log.debug("recv_cb_ap {?} {} {?}", .{ buf, len, eb });
 
-    const packet: ReceivedPacket = .{
-        .data = @as([*]const u8, @ptrCast(buf))[0..len],
-        .eb = eb,
-    };
+    if (wifi_options.on_packet_received) |on_packet_received|
+        on_packet_received(.ap, @as([*]const u8, @ptrCast(buf))[0..len]);
 
-    ap_rx_queue.enqueue(packet) catch {
-        log.warn("ap rx queue full. packet dropped.", .{});
-        packet.deinit();
-    };
+    c.esp_wifi_internal_free_rx_buffer(eb);
 
     return c.ESP_OK;
 }
@@ -574,17 +642,26 @@ fn recv_cb_ap(buf: ?*anyopaque, len: u16, eb: ?*anyopaque) callconv(.c) c.esp_er
 fn recv_cb_sta(buf: ?*anyopaque, len: u16, eb: ?*anyopaque) callconv(.c) c.esp_err_t {
     log.debug("recv_cb_sta {?} {} {?}", .{ buf, len, eb });
 
-    const packet: ReceivedPacket = .{
-        .data = @as([*]const u8, @ptrCast(buf))[0..len],
-        .eb = eb,
-    };
+    if (wifi_options.on_packet_received) |on_packet_received|
+        on_packet_received(.sta, @as([*]const u8, @ptrCast(buf))[0..len]);
 
-    sta_rx_queue.enqueue(packet) catch {
-        log.warn("sta rx queue full. packet dropped.", .{});
-        packet.deinit();
-    };
+    c.esp_wifi_internal_free_rx_buffer(eb);
 
     return c.ESP_OK;
+}
+
+fn export_symbols() void {
+    @export(&esp_event_post, .{
+        .name = "esp_event_post",
+    });
+
+    @export(&g_wifi_feature_caps, .{
+        .name = "g_wifi_feature_caps",
+    });
+
+    @export(&g_wifi_osi_funcs, .{
+        .name = "g_wifi_osi_funcs",
+    });
 }
 
 // TODO: configurable
@@ -625,9 +702,9 @@ const wifi_enable_enterprise: u64 = 1 << 7;
 // const wifi_enable_gmac: u64 = 1 << 5;
 // const wifi_enable_11r: u64 = 1 << 6;
 
-export var g_wifi_feature_caps: u64 = wifi_enable_wpa3_sae | wifi_enable_enterprise;
+var g_wifi_feature_caps: u64 = wifi_enable_wpa3_sae | wifi_enable_enterprise;
 
-export var g_wifi_osi_funcs: c.wifi_osi_funcs_t = .{
+var g_wifi_osi_funcs: c.wifi_osi_funcs_t = .{
     ._version = c.ESP_WIFI_OS_ADAPTER_VERSION,
     ._env_is_chip = osi.env_is_chip,
     ._set_intr = osi.set_intr,

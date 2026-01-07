@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
         .{ .name = "stepper_driver_dumb", .file = "src/stepper_driver_dumb.zig" },
         .{ .name = "systimer", .file = "src/systimer.zig" },
         .{ .name = "ws2812_blinky", .file = "src/ws2812_blinky.zig" },
-        .{ .name = "scheduler", .file = "src/scheduler.zig" },
+        .{ .name = "rtos", .file = "src/rtos.zig" },
         .{ .name = "wifi", .file = "src/wifi.zig", .features = .{
             .flashless = false,
             .lwip = true,
@@ -113,7 +113,7 @@ pub fn build(b: *std.Build) void {
 
 const TargetEnum = enum {
     esp32_c3,
-    esp32_c3_direct_boot,
+    // esp32_c3_direct_boot,
     esp32_c3_flashless,
 
     fn get_target_desc(target_enum: TargetEnum, mb: *MicroBuild) TargetDescription {
@@ -122,10 +122,10 @@ const TargetEnum = enum {
                 .prefix = "esp32_c3",
                 .target = mb.ports.esp.chips.esp32_c3,
             },
-            .esp32_c3_direct_boot => .{
-                .prefix = "esp32_c3_direct_boot",
-                .target = mb.ports.esp.chips.esp32_c3_direct_boot,
-            },
+            // .esp32_c3_direct_boot => .{
+            //     .prefix = "esp32_c3_direct_boot",
+            //     .target = mb.ports.esp.chips.esp32_c3_direct_boot,
+            // },
             .esp32_c3_flashless => .{
                 .prefix = "esp32_c3_flashless",
                 .target = mb.ports.esp.chips.esp32_c3_flashless,

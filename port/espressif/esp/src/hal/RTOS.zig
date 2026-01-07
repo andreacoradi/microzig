@@ -83,6 +83,8 @@ pub fn init(rtos: *RTOS, gpa: Allocator) void {
     comptime {
         if (microzig.options.cpu.interrupt_stack_size == null)
             @compileError("Please enable interrupt stacks to use the rtos");
+        microzig.cpu.interrupt.expect_handler(rtos_options.general_purpose_interrupt, general_purpose_interrupt_handler);
+        microzig.cpu.interrupt.expect_handler(rtos_options.yield_interrupt, yield_interrupt_handler);
     }
 
     assert(maybe_instance == null);
@@ -124,7 +126,7 @@ pub fn init(rtos: *RTOS, gpa: Allocator) void {
     rtos_options.systimer_alarm.set_enabled(false);
     rtos_options.systimer_alarm.set_interrupt_enabled(true);
 
-    microzig.cpu.interrupt.map(.systimer_target0, rtos_options.general_purpose_interrupt);
+    microzig.cpu.interrupt.map(rtos_options.systimer_alarm.interrupt_source(), rtos_options.general_purpose_interrupt);
     microzig.cpu.interrupt.set_type(rtos_options.general_purpose_interrupt, .level);
     microzig.cpu.interrupt.set_priority(rtos_options.general_purpose_interrupt, .lowest);
     microzig.cpu.interrupt.enable(rtos_options.general_purpose_interrupt);
@@ -228,7 +230,7 @@ pub inline fn yield_and_leave_cs(rtos: *RTOS, action: YieldAction, cs: CriticalS
     context_switch(&current_task.context, &next_task.context);
 }
 
-fn yield_inner(rtos: *RTOS, action: YieldAction) struct { *Task, *Task } {
+fn yield_inner(rtos: *RTOS, action: YieldAction) linksection(".ram_text") struct { *Task, *Task } {
     const current_task = rtos.current_task;
     switch (action) {
         .reschedule => {
@@ -361,136 +363,140 @@ pub fn is_a_higher_priority_task_ready(rtos: *RTOS) bool {
         false;
 }
 
-pub fn yield_handler() linksection(".ram_vectors") callconv(.naked) void {
-    comptime {
-        assert(@sizeOf(Context) == 3 * @sizeOf(usize));
-    }
+pub const yield_interrupt_handler: microzig.cpu.InterruptHandler = .{
+    .naked = struct {
+        pub fn handler_fn() linksection(".ram_vectors") callconv(.naked) void {
+            comptime {
+                assert(@sizeOf(Context) == 3 * @sizeOf(usize));
+            }
 
-    asm volatile (
-        \\
-        \\addi sp, sp, -31*4
-        \\
-        \\sw ra, 0*4(sp)
-        \\sw t0, 1*4(sp)
-        \\sw t1, 2*4(sp)
-        \\sw t2, 3*4(sp)
-        \\sw t3, 4*4(sp)
-        \\sw t4, 5*4(sp)
-        \\sw t5, 6*4(sp)
-        \\sw t6, 7*4(sp)
-        \\sw a0, 8*4(sp)
-        \\sw a1, 9*4(sp)
-        \\sw a2, 10*4(sp)
-        \\sw a3, 11*4(sp)
-        \\sw a4, 12*4(sp)
-        \\sw a5, 13*4(sp)
-        \\sw a6, 14*4(sp)
-        \\sw a7, 15*4(sp)
-        \\sw s1, 16*4(sp)
-        \\sw s2, 17*4(sp)
-        \\sw s3, 18*4(sp)
-        \\sw s4, 19*4(sp)
-        \\sw s5, 20*4(sp)
-        \\sw s6, 21*4(sp)
-        \\sw s7, 22*4(sp)
-        \\sw s8, 23*4(sp)
-        \\sw s9, 24*4(sp)
-        \\sw s10, 25*4(sp)
-        \\sw s11, 26*4(sp)
-        \\sw gp, 27*4(sp)
-        \\sw tp, 28*4(sp)
-        \\
-        \\csrr a1, mepc
-        \\sw a1, 29*4(sp)
-        \\
-        \\csrr a1, mstatus
-        \\sw a1, 30*4(sp)
-        \\
-        // save sp for later
-        \\mv a2, sp
-        \\
-        // use the interrupt stack in this call to minimize task stack size
-        // NOTE: mscratch doesn't need to be zeroed because this can't be
-        // interrupted by a higher priority interrupt
-        \\la sp, %[interrupt_stack_top]
-        \\
-        // allocate `Context` struct and save context
-        \\addi sp, sp, -16
-        \\la a1, 1f
-        \\sw a1, 0(sp)
-        \\sw a2, 4(sp)
-        \\sw s0, 8(sp)
-        \\
-        // first parameter is a pointer to context
-        \\mv a0, sp
-        \\mv s1, a1
-        \\jal %[schedule_in_isr]
-        \\
-        // load next task context
-        \\lw a1, 0(sp)
-        \\lw a2, 4(sp)
-        \\lw s0, 8(sp)
-        // change sp to the new task
-        \\mv sp, a2
-        \\
-        // if the next task program counter is equal to 1f's location just jump
-        // to it (ie. the task was interrupted). Technically not required but
-        // works as an optimization.
-        \\beq a1, s1, 1f
-        \\
-        // ensure interrupts get enabled after mret
-        \\li t0, 0x80
-        \\csrs mstatus, t0
-        \\
-        // jump to new task
-        \\csrw mepc, a1
-        \\mret
-        \\
-        \\1:
-        \\
-        \\lw t1, 30*4(sp)
-        \\csrw mstatus, t1
-        \\
-        \\lw t0, 29*4(sp)
-        \\csrw mepc, t0
-        \\
-        \\lw ra, 0*4(sp)
-        \\lw t0, 1*4(sp)
-        \\lw t1, 2*4(sp)
-        \\lw t2, 3*4(sp)
-        \\lw t3, 4*4(sp)
-        \\lw t4, 5*4(sp)
-        \\lw t5, 6*4(sp)
-        \\lw t6, 7*4(sp)
-        \\lw a0, 8*4(sp)
-        \\lw a1, 9*4(sp)
-        \\lw a2, 10*4(sp)
-        \\lw a3, 11*4(sp)
-        \\lw a4, 12*4(sp)
-        \\lw a5, 13*4(sp)
-        \\lw a6, 14*4(sp)
-        \\lw a7, 15*4(sp)
-        \\lw s1, 16*4(sp)
-        \\lw s2, 17*4(sp)
-        \\lw s3, 18*4(sp)
-        \\lw s4, 19*4(sp)
-        \\lw s5, 20*4(sp)
-        \\lw s6, 21*4(sp)
-        \\lw s7, 22*4(sp)
-        \\lw s8, 23*4(sp)
-        \\lw s9, 24*4(sp)
-        \\lw s10, 25*4(sp)
-        \\lw s11, 26*4(sp)
-        \\lw gp, 27*4(sp)
-        \\lw tp, 28*4(sp)
-        \\
-        \\addi sp, sp, 31*4
-        \\mret
-        :
-        : [schedule_in_isr] "i" (&schedule_in_isr),
-          [interrupt_stack_top] "i" (microzig.cpu.interrupt_stack[microzig.cpu.interrupt_stack.len..].ptr),
-    );
-}
+            asm volatile (
+                \\
+                \\addi sp, sp, -31*4
+                \\
+                \\sw ra, 0*4(sp)
+                \\sw t0, 1*4(sp)
+                \\sw t1, 2*4(sp)
+                \\sw t2, 3*4(sp)
+                \\sw t3, 4*4(sp)
+                \\sw t4, 5*4(sp)
+                \\sw t5, 6*4(sp)
+                \\sw t6, 7*4(sp)
+                \\sw a0, 8*4(sp)
+                \\sw a1, 9*4(sp)
+                \\sw a2, 10*4(sp)
+                \\sw a3, 11*4(sp)
+                \\sw a4, 12*4(sp)
+                \\sw a5, 13*4(sp)
+                \\sw a6, 14*4(sp)
+                \\sw a7, 15*4(sp)
+                \\sw s1, 16*4(sp)
+                \\sw s2, 17*4(sp)
+                \\sw s3, 18*4(sp)
+                \\sw s4, 19*4(sp)
+                \\sw s5, 20*4(sp)
+                \\sw s6, 21*4(sp)
+                \\sw s7, 22*4(sp)
+                \\sw s8, 23*4(sp)
+                \\sw s9, 24*4(sp)
+                \\sw s10, 25*4(sp)
+                \\sw s11, 26*4(sp)
+                \\sw gp, 27*4(sp)
+                \\sw tp, 28*4(sp)
+                \\
+                \\csrr a1, mepc
+                \\sw a1, 29*4(sp)
+                \\
+                \\csrr a1, mstatus
+                \\sw a1, 30*4(sp)
+                \\
+                // save sp for later
+                \\mv a2, sp
+                \\
+                // use the interrupt stack in this call to minimize task stack size
+                // NOTE: mscratch doesn't need to be zeroed because this can't be
+                // interrupted by a higher priority interrupt
+                \\la sp, %[interrupt_stack_top]
+                \\
+                // allocate `Context` struct and save context
+                \\addi sp, sp, -16
+                \\la a1, 1f
+                \\sw a1, 0(sp)
+                \\sw a2, 4(sp)
+                \\sw s0, 8(sp)
+                \\
+                // first parameter is a pointer to context
+                \\mv a0, sp
+                \\mv s1, a1
+                \\jal %[schedule_in_isr]
+                \\
+                // load next task context
+                \\lw a1, 0(sp)
+                \\lw a2, 4(sp)
+                \\lw s0, 8(sp)
+                // change sp to the new task
+                \\mv sp, a2
+                \\
+                // if the next task program counter is equal to 1f's location just jump
+                // to it (ie. the task was interrupted). Technically not required but
+                // works as an optimization.
+                \\beq a1, s1, 1f
+                \\
+                // ensure interrupts get enabled after mret
+                \\li t0, 0x80
+                \\csrs mstatus, t0
+                \\
+                // jump to new task
+                \\csrw mepc, a1
+                \\mret
+                \\
+                \\1:
+                \\
+                \\lw t1, 30*4(sp)
+                \\csrw mstatus, t1
+                \\
+                \\lw t0, 29*4(sp)
+                \\csrw mepc, t0
+                \\
+                \\lw ra, 0*4(sp)
+                \\lw t0, 1*4(sp)
+                \\lw t1, 2*4(sp)
+                \\lw t2, 3*4(sp)
+                \\lw t3, 4*4(sp)
+                \\lw t4, 5*4(sp)
+                \\lw t5, 6*4(sp)
+                \\lw t6, 7*4(sp)
+                \\lw a0, 8*4(sp)
+                \\lw a1, 9*4(sp)
+                \\lw a2, 10*4(sp)
+                \\lw a3, 11*4(sp)
+                \\lw a4, 12*4(sp)
+                \\lw a5, 13*4(sp)
+                \\lw a6, 14*4(sp)
+                \\lw a7, 15*4(sp)
+                \\lw s1, 16*4(sp)
+                \\lw s2, 17*4(sp)
+                \\lw s3, 18*4(sp)
+                \\lw s4, 19*4(sp)
+                \\lw s5, 20*4(sp)
+                \\lw s6, 21*4(sp)
+                \\lw s7, 22*4(sp)
+                \\lw s8, 23*4(sp)
+                \\lw s9, 24*4(sp)
+                \\lw s10, 25*4(sp)
+                \\lw s11, 26*4(sp)
+                \\lw gp, 27*4(sp)
+                \\lw tp, 28*4(sp)
+                \\
+                \\addi sp, sp, 31*4
+                \\mret
+                :
+                : [schedule_in_isr] "i" (&schedule_in_isr),
+                  [interrupt_stack_top] "i" (microzig.cpu.interrupt_stack[microzig.cpu.interrupt_stack.len..].ptr),
+            );
+        }
+    }.handler_fn,
+};
 
 fn schedule_in_isr(context: *Context) linksection(".ram_vectors") callconv(.c) void {
     const rtos = maybe_instance orelse @panic("no active rtos");
@@ -538,28 +544,25 @@ fn schedule_wake_at(rtos: *RTOS, sleeping_task: *Task, ticks: TimerTicks) void {
     }
 }
 
-pub fn general_purpose_interrupt_handler(_: *TrapFrame) linksection(".ram_text") callconv(.c) void {
-    const rtos = maybe_instance orelse @panic("no active rtos");
+pub const general_purpose_interrupt_handler: microzig.cpu.InterruptHandler = .{ .c = struct {
+    pub fn handler_fn(_: *TrapFrame) linksection(".ram_text") callconv(.c) void {
+        const rtos = maybe_instance orelse @panic("no active rtos");
 
-    var iter: microzig.cpu.interrupt.SourceIterator = .init();
-    while (iter.next()) |source| {
-        switch (source) {
-            .systimer_target0 => {
-                const cs = enter_critical_section();
-                defer cs.leave();
+        var status: microzig.cpu.interrupt.Status = .init();
+        if (status.is_set(rtos_options.systimer_alarm.interrupt_source())) {
+            rtos_options.systimer_alarm.clear_interrupt();
 
-                rtos_options.systimer_alarm.clear_interrupt();
+            const cs = enter_critical_section();
+            defer cs.leave();
 
-                rtos.sweep_timer_queue_for_timeouts();
-            },
-            else => {},
+            rtos.sweep_timer_queue_for_timeouts();
+        }
+
+        if (rtos.is_a_higher_priority_task_ready()) {
+            yield_from_isr();
         }
     }
-
-    if (rtos.is_a_higher_priority_task_ready()) {
-        yield_from_isr();
-    }
-}
+}.handler_fn };
 
 fn sweep_timer_queue_for_timeouts(rtos: *RTOS) void {
     while (rtos.timer_queue.popFirst()) |node| {

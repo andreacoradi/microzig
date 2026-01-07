@@ -39,7 +39,12 @@ pub fn init(allocator: Allocator, rtos: *RTOS) Allocator.Error!void {
         osi.allocator = allocator;
         osi.rtos = rtos;
 
-        setup_interrupts();
+        const radio_interrupt = microzig.options.hal.radio.interrupt;
+        comptime microzig.cpu.interrupt.expect_handler(radio_interrupt, interrupt_handler);
+        microzig.cpu.interrupt.map(.wifi_mac, radio_interrupt);
+        microzig.cpu.interrupt.map(.wifi_pwr, radio_interrupt);
+        microzig.cpu.interrupt.set_type(radio_interrupt, .level);
+        microzig.cpu.interrupt.set_priority(radio_interrupt, .highest);
     }
 
     log.debug("initialization complete", .{});
@@ -126,18 +131,17 @@ fn enable_wifi_power_domain_and_init_clocks() void {
     });
 }
 
-fn setup_interrupts() void {
-    const radio_interrupt = microzig.options.hal.radio.interrupt;
-    microzig.cpu.interrupt.map(.wifi_mac, radio_interrupt);
-    microzig.cpu.interrupt.map(.wifi_pwr, radio_interrupt);
-    microzig.cpu.interrupt.set_type(radio_interrupt, .level);
-    microzig.cpu.interrupt.set_priority(radio_interrupt, .highest);
-}
-
-pub fn interrupt_handler(_: *TrapFrame) linksection(".ram_text") callconv(.c) void {
-    if (osi.wifi_interrupt_handler) |handler| {
-        handler.f(handler.arg);
-    } else {
-        // should be unreachable
-    }
-}
+pub const interrupt_handler: microzig.cpu.InterruptHandler = .{
+    .c = struct {
+        pub fn handler_fn(_: *TrapFrame) linksection(".ram_text") callconv(.c) void {
+            const status: microzig.cpu.interrupt.Status = .init();
+            if (status.is_set(.wifi_mac) or status.is_set(.wifi_pwr)) {
+                if (osi.wifi_interrupt_handler) |handler| {
+                    handler.f(handler.arg);
+                } else {
+                    // should be unreachable
+                }
+            }
+        }
+    }.handler_fn,
+};
