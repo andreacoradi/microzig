@@ -1,35 +1,33 @@
-const builtin = @import("builtin");
 const std = @import("std");
-const log = std.log.scoped(.esp_radio_osi);
+const builtin = @import("builtin");
 
+const c = @import("esp-wifi-driver");
 const microzig = @import("microzig");
 const enter_critical_section = microzig.interrupt.enter_critical_section;
 const time = microzig.drivers.time;
 const peripherals = microzig.chip.peripherals;
 const APB_CTRL = peripherals.APB_CTRL;
-const hal = microzig.hal;
+const radio_interrupt = microzig.options.hal.radio.interrupt;
 
 const radio = @import("../radio.zig");
-const RTOS = @import("../RTOS.zig");
+const rng = @import("../rng.zig");
+const rtos = @import("../rtos.zig");
 const systimer = @import("../systimer.zig");
 const get_time_since_boot = @import("../time.zig").get_time_since_boot;
 const timer = @import("timer.zig");
 const wifi = @import("wifi.zig");
 
-const c = @import("esp-wifi-driver");
+const log = std.log.scoped(.esp_radio_osi);
 
 // TODO: config
 const coex_enabled: bool = false;
 
-pub var allocator: std.mem.Allocator = undefined;
-pub var rtos: *RTOS = undefined;
+pub var gpa: std.mem.Allocator = undefined;
 
 pub var wifi_interrupt_handler: ?struct {
     f: *const fn (?*anyopaque) callconv(.c) void,
     arg: ?*anyopaque,
 } = undefined;
-
-const radio_interrupt = microzig.options.hal.radio.interrupt;
 
 extern fn vsnprintf(buffer: [*c]u8, len: usize, fmt: [*c]const u8, va_list: std.builtin.VaList) callconv(.c) void;
 
@@ -94,7 +92,7 @@ pub fn __assert_func(
 pub fn malloc(len: usize) callconv(.c) ?*anyopaque {
     log.debug("malloc {}", .{len});
 
-    const buf = allocator.rawAlloc(8 + len, .@"8", @returnAddress()) orelse {
+    const buf = gpa.rawAlloc(8 + len, .@"8", @returnAddress()) orelse {
         log.warn("failed to allocate memory: {}", .{len});
         return null;
     };
@@ -114,10 +112,6 @@ pub fn calloc(number: usize, size: usize) callconv(.c) ?*anyopaque {
 }
 
 pub fn free(ptr: ?*anyopaque) callconv(.c) void {
-    // Avoid multiple frees at the same time as it causes a panic
-    microzig.cpu.interrupt.disable_interrupts();
-    defer microzig.cpu.interrupt.enable_interrupts();
-
     log.debug("free {?}", .{ptr});
 
     if (ptr == null) {
@@ -127,7 +121,7 @@ pub fn free(ptr: ?*anyopaque) callconv(.c) void {
 
     const buf_ptr: [*]u8 = @ptrFromInt(@intFromPtr(ptr) - 8);
     const buf_len: *usize = @ptrCast(@alignCast(buf_ptr));
-    allocator.rawFree(buf_ptr[0 .. @sizeOf(usize) + buf_len.*], .@"8", @returnAddress());
+    gpa.rawFree(buf_ptr[0 .. @sizeOf(usize) + buf_len.*], .@"8", @returnAddress());
 }
 
 pub fn puts(ptr: ?*anyopaque) callconv(.c) void {
@@ -159,9 +153,36 @@ pub fn vTaskDelay(ticks: u32) callconv(.c) void {
     rtos.sleep(.from_us(ticks));
 }
 
-comptime {
-    // provide some weak links so they can be overriten
+pub var WIFI_EVENT: c.esp_event_base_t = "WIFI_EVENT";
 
+pub fn rtc_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
+    syslog(fmt, @cVaStart());
+}
+
+pub fn phy_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
+    syslog(fmt, @cVaStart());
+}
+
+pub fn coexist_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
+    syslog(fmt, @cVaStart());
+}
+
+pub fn net80211_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
+    syslog(fmt, @cVaStart());
+}
+
+pub fn pp_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
+    syslog(fmt, @cVaStart());
+}
+
+pub fn esp_fill_random(buf: [*c]u8, len: usize) callconv(.c) void {
+    log.debug("esp_fill_random {any} {}", .{ buf, len });
+
+    rng.read(buf[0..len]);
+}
+
+pub fn export_symbols() void {
+    // provide weak links so they can be overriten
     @export(&strlen, .{ .name = "strlen", .linkage = .weak });
     @export(&strnlen, .{ .name = "strnlen", .linkage = .weak });
     @export(&strrchr, .{ .name = "strrchr", .linkage = .weak });
@@ -177,34 +198,14 @@ comptime {
     @export(&sleep, .{ .name = "sleep", .linkage = .weak });
     @export(&usleep, .{ .name = "usleep", .linkage = .weak });
     @export(&vTaskDelay, .{ .name = "vTaskDelay", .linkage = .weak });
-}
 
-pub export var WIFI_EVENT: c.esp_event_base_t = "WIFI_EVENT";
-
-pub export fn rtc_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    syslog(fmt, @cVaStart());
-}
-
-pub export fn phy_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    syslog(fmt, @cVaStart());
-}
-
-pub export fn coexist_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    syslog(fmt, @cVaStart());
-}
-
-pub export fn net80211_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    syslog(fmt, @cVaStart());
-}
-
-pub export fn pp_printf(fmt: ?[*:0]const u8, ...) callconv(.c) void {
-    syslog(fmt, @cVaStart());
-}
-
-pub export fn esp_fill_random(buf: [*c]u8, len: usize) callconv(.c) void {
-    log.debug("esp_fill_random {any} {}", .{ buf, len });
-
-    hal.rng.read(buf[0..len]);
+    @export(&WIFI_EVENT, .{ .name = "WIFI_EVENT" });
+    @export(&rtc_printf, .{ .name = "rtc_printf" });
+    @export(&phy_printf, .{ .name = "phy_printf" });
+    @export(&coexist_printf, .{ .name = "coexist_printf" });
+    @export(&net80211_printf, .{ .name = "net80211_printf" });
+    @export(&pp_printf, .{ .name = "pp_printf" });
+    @export(&esp_fill_random, .{ .name = "esp_fill_random" });
 }
 
 // ----- end of exports -----
@@ -306,13 +307,13 @@ pub fn wifi_int_restore(mux_ptr: ?*anyopaque, state: u32) callconv(.c) void {
 pub fn task_yield_from_isr() callconv(.c) void {
     log.debug("task_yield_from_isr", .{});
 
-    RTOS.yield_from_isr();
+    rtos.yield_from_isr();
 }
 
 pub fn semphr_create(max_value: u32, init_value: u32) callconv(.c) ?*anyopaque {
     log.debug("semphr_create {} {}", .{ max_value, init_value });
 
-    const sem = allocator.create(RTOS.Semaphore) catch {
+    const sem = gpa.create(rtos.Semaphore) catch {
         log.warn("failed to allocate semaphore", .{});
         return null;
     };
@@ -326,18 +327,18 @@ pub fn semphr_create(max_value: u32, init_value: u32) callconv(.c) ?*anyopaque {
 pub fn semphr_delete(ptr: ?*anyopaque) callconv(.c) void {
     log.debug("semphr_delete {?}", .{ptr});
 
-    allocator.destroy(@as(*RTOS.Semaphore, @ptrCast(@alignCast(ptr))));
+    gpa.destroy(@as(*rtos.Semaphore, @ptrCast(@alignCast(ptr))));
 }
 
 pub fn semphr_take(ptr: ?*anyopaque, tick: u32) callconv(.c) i32 {
     log.debug("semphr_take {?} {}", .{ ptr, tick });
 
-    const sem: *RTOS.Semaphore = @ptrCast(@alignCast(ptr));
+    const sem: *rtos.Semaphore = @ptrCast(@alignCast(ptr));
     const maybe_timeout: ?time.Duration = if (tick == c.OSI_FUNCS_TIME_BLOCKING)
         .from_us(tick)
     else
         null;
-    sem.take_with_timeout(rtos, maybe_timeout) catch {
+    sem.take_with_timeout(maybe_timeout) catch {
         log.debug(">>>> return from semaphore take with timeout: {*}", .{sem});
         return 1;
     };
@@ -348,19 +349,19 @@ pub fn semphr_take(ptr: ?*anyopaque, tick: u32) callconv(.c) i32 {
 pub fn semphr_give(ptr: ?*anyopaque) callconv(.c) i32 {
     log.debug("semphr_give {?}", .{ptr});
 
-    const sem: *RTOS.Semaphore = @ptrCast(@alignCast(ptr));
-    sem.give(rtos);
+    const sem: *rtos.Semaphore = @ptrCast(@alignCast(ptr));
+    sem.give();
     return 1;
 }
 
 pub fn wifi_thread_semphr_get() callconv(.c) ?*anyopaque {
-    return &rtos.current_task.semaphore;
+    return &rtos.get_current_task().semaphore;
 }
 
 pub fn mutex_create() callconv(.c) ?*anyopaque {
     log.debug("mutex_create", .{});
 
-    const mutex = allocator.create(RTOS.RecursiveMutex) catch {
+    const mutex = gpa.create(rtos.RecursiveMutex) catch {
         log.warn("failed to allocate recursive mutex", .{});
         return null;
     };
@@ -376,7 +377,7 @@ pub fn mutex_create() callconv(.c) ?*anyopaque {
 pub fn recursive_mutex_create() callconv(.c) ?*anyopaque {
     log.debug("recursive_mutex_create", .{});
 
-    const mutex = allocator.create(RTOS.RecursiveMutex) catch {
+    const mutex = gpa.create(rtos.RecursiveMutex) catch {
         log.warn("failed to allocate recursive mutex", .{});
         return null;
     };
@@ -392,15 +393,15 @@ pub fn recursive_mutex_create() callconv(.c) ?*anyopaque {
 pub fn mutex_delete(ptr: ?*anyopaque) callconv(.c) void {
     log.debug("mutex_delete {?}", .{ptr});
 
-    const mutex: *RTOS.RecursiveMutex = @ptrCast(@alignCast(ptr));
-    allocator.destroy(mutex);
+    const mutex: *rtos.RecursiveMutex = @ptrCast(@alignCast(ptr));
+    gpa.destroy(mutex);
 }
 
 pub fn mutex_lock(ptr: ?*anyopaque) callconv(.c) i32 {
     log.debug("mutex lock {?}", .{ptr});
 
-    const mutex: *RTOS.RecursiveMutex = @ptrCast(@alignCast(ptr));
-    mutex.lock(rtos);
+    const mutex: *rtos.RecursiveMutex = @ptrCast(@alignCast(ptr));
+    mutex.lock();
 
     return 1;
 }
@@ -408,13 +409,13 @@ pub fn mutex_lock(ptr: ?*anyopaque) callconv(.c) i32 {
 pub fn mutex_unlock(ptr: ?*anyopaque) callconv(.c) i32 {
     log.debug("mutex unlock {?}", .{ptr});
 
-    const mutex: *RTOS.RecursiveMutex = @ptrCast(@alignCast(ptr));
-    return @intFromBool(mutex.unlock(rtos));
+    const mutex: *rtos.RecursiveMutex = @ptrCast(@alignCast(ptr));
+    return @intFromBool(mutex.unlock());
 }
 
 pub const QueueWrapper = struct {
     item_len: u32,
-    inner: RTOS.TypeErasedQueue,
+    inner: rtos.TypeErasedQueue,
 };
 
 pub fn queue_create(capacity: u32, item_len: u32) callconv(.c) ?*anyopaque {
@@ -427,14 +428,14 @@ pub fn queue_create(capacity: u32, item_len: u32) callconv(.c) ?*anyopaque {
         break :blk .{ 3, 8 };
     };
 
-    const buf: []u8 = allocator.alloc(u8, new_cap * item_len) catch {
+    const buf: []u8 = gpa.alloc(u8, new_cap * item_len) catch {
         log.warn("failed to allocate queue buffer", .{});
         return null;
     };
 
-    const queue = allocator.create(QueueWrapper) catch {
+    const queue = gpa.create(QueueWrapper) catch {
         log.warn("failed to allocate queue", .{});
-        allocator.free(buf);
+        gpa.free(buf);
         return null;
     };
 
@@ -452,8 +453,8 @@ pub fn queue_delete(ptr: ?*anyopaque) callconv(.c) void {
     log.debug("queue_delete {?}", .{ptr});
 
     const queue: *QueueWrapper = @ptrCast(@alignCast(ptr));
-    allocator.free(queue.inner.buffer);
-    allocator.destroy(queue);
+    gpa.free(queue.inner.buffer);
+    gpa.destroy(queue);
 }
 
 pub fn queue_send(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32) callconv(.c) i32 {
@@ -463,9 +464,8 @@ pub fn queue_send(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32)
     const item: [*]const u8 = @ptrCast(@alignCast(item_ptr));
 
     const size = switch (block_time_tick) {
-        0 => queue.inner.put_non_blocking(rtos, item[0..queue.item_len]),
+        0 => queue.inner.put_non_blocking(item[0..queue.item_len]),
         else => queue.inner.put(
-            rtos,
             item[0..queue.item_len],
             1,
             if (block_time_tick == c.OSI_FUNCS_TIME_BLOCKING)
@@ -483,7 +483,7 @@ pub fn queue_send_from_isr(ptr: ?*anyopaque, item_ptr: ?*anyopaque, _hptw: ?*any
 
     const queue: *QueueWrapper = @ptrCast(@alignCast(ptr));
     const item: [*]const u8 = @ptrCast(@alignCast(item_ptr));
-    const n = @divExact(queue.inner.put_non_blocking(rtos, item[0..queue.item_len]), queue.item_len);
+    const n = @divExact(queue.inner.put_non_blocking(item[0..queue.item_len]), queue.item_len);
 
     @as(*u32, @ptrCast(@alignCast(_hptw))).* = @intFromBool(rtos.is_a_higher_priority_task_ready());
 
@@ -505,12 +505,8 @@ pub fn queue_recv(ptr: ?*anyopaque, item_ptr: ?*anyopaque, block_time_tick: u32)
     const item: [*]u8 = @ptrCast(@alignCast(item_ptr));
 
     const size = switch (block_time_tick) {
-        0 => queue.inner.get_non_blocking(
-            rtos,
-            item[0..queue.item_len],
-        ),
+        0 => queue.inner.get_non_blocking(item[0..queue.item_len]),
         else => queue.inner.get(
-            rtos,
             item[0..queue.item_len],
             queue.item_len,
             if (block_time_tick == c.OSI_FUNCS_TIME_BLOCKING)
@@ -571,7 +567,7 @@ fn task_create_common(
 
     const task_entry: *const fn (param: ?*anyopaque) callconv(.c) noreturn = @ptrCast(@alignCast(task_func));
 
-    const task: *RTOS.Task = rtos.spawn(task_wrapper, .{ task_entry, param }, .{
+    const task: *rtos.Task = rtos.spawn(gpa, task_wrapper, .{ task_entry, param }, .{
         .priority = @enumFromInt(prio),
         .stack_size = stack_depth,
     }) catch {
@@ -645,11 +641,11 @@ pub fn task_ms_to_tick(ms: u32) callconv(.c) i32 {
 }
 
 pub fn task_get_current_task() callconv(.c) ?*anyopaque {
-    return rtos.current_task;
+    return rtos.get_current_task();
 }
 
 pub fn task_get_max_priority() callconv(.c) i32 {
-    return @intFromEnum(RTOS.Priority.highest);
+    return @intFromEnum(rtos.Priority.highest);
 }
 
 pub fn get_free_heap_size() callconv(.c) void {
@@ -657,7 +653,7 @@ pub fn get_free_heap_size() callconv(.c) void {
 }
 
 pub fn rand() callconv(.c) u32 {
-    return hal.rng.random_u32();
+    return rng.random_u32();
 }
 
 pub fn dport_access_stall_other_cpu_start_wrap() callconv(.c) void {
@@ -857,7 +853,7 @@ pub fn phy_update_country_info(country: [*c]const u8) callconv(.c) c_int {
 pub fn read_mac(mac: [*c]u8, typ: c_uint) callconv(.c) c_int {
     log.debug("read_mac {*} {}", .{ mac, typ });
 
-    const mac_tmp: [6]u8 = hal.radio.read_mac(switch (typ) {
+    const mac_tmp: [6]u8 = radio.read_mac(switch (typ) {
         0 => .sta,
         1 => .ap,
         2 => .bt,
@@ -898,7 +894,7 @@ pub fn timer_done(ets_timer_ptr: ?*anyopaque) callconv(.c) void {
     if (timer.find(ets_timer)) |tim| {
         ets_timer.priv = null;
         ets_timer.expire = 0;
-        timer.remove(allocator, tim);
+        timer.remove(gpa, tim);
     } else {
         log.warn("timer not found based on ets_timer", .{});
     }
@@ -925,7 +921,7 @@ pub fn timer_setfn(ets_timer_ptr: ?*anyopaque, callback_ptr: ?*anyopaque, arg: ?
         ets_timer.func = null;
         ets_timer.priv = null;
 
-        timer.add(allocator, ets_timer, callback, arg) catch {
+        timer.add(gpa, ets_timer, callback, arg) catch {
             log.warn("failed to allocate timer", .{});
         };
     }
@@ -1031,7 +1027,7 @@ pub fn nvs_erase_key() callconv(.c) void {
 }
 
 pub fn get_random(buf: [*c]u8, len: usize) callconv(.c) c_int {
-    hal.rng.read(buf[0..len]);
+    rng.read(buf[0..len]);
     return 0;
 }
 
@@ -1040,7 +1036,7 @@ pub fn get_time() callconv(.c) void {
 }
 
 pub fn random() callconv(.c) c_ulong {
-    return hal.rng.random_u32();
+    return rng.random_u32();
 }
 
 pub fn slowclk_cal_get() callconv(.c) u32 {
@@ -1094,7 +1090,7 @@ pub fn wifi_create_queue(capacity: c_int, item_len: c_int) callconv(.c) ?*anyopa
 
     std.debug.assert(wifi_queue_handle == null);
 
-    const buf: []u8 = allocator.alloc(u8, @intCast(capacity * item_len)) catch {
+    const buf: []u8 = gpa.alloc(u8, @intCast(capacity * item_len)) catch {
         log.warn("failed to allocate queue buffer", .{});
         return null;
     };
@@ -1116,7 +1112,7 @@ pub fn wifi_delete_queue(ptr: ?*anyopaque) callconv(.c) void {
     std.debug.assert(ptr == @as(?*anyopaque, @ptrCast(&wifi_queue_handle)));
 
     const queue: *?*QueueWrapper = @ptrCast(@alignCast(ptr));
-    allocator.free(queue.*.?.inner.buffer);
+    gpa.free(queue.*.?.inner.buffer);
 
     wifi_queue_handle = null;
     wifi_queue = undefined;

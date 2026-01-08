@@ -4,13 +4,18 @@ const microzig = @import("microzig");
 const cpu_config = @import("cpu-config");
 const riscv32_common = @import("riscv32-common");
 
+const interrupt_stack_options = microzig.options.cpu.interrupt_stack;
+
 pub const CPU_Options = struct {
-    /// If null, interrupts will use same stack. Otherwise, the interrupt
-    /// handler will switch to a custom stack after pushing the TrapFrame.
-    /// Nested interrupts use the interrupt stack as well. This feature uses
-    /// mscratch to store the user's stack pointer. While not in an interrupt,
-    /// mscratch must be zero.
-    interrupt_stack_size: ?usize = null,
+    /// If not enabled, interrupts will use same stack. Otherwise, the
+    /// interrupt handler will switch to a custom stack after pushing the
+    /// TrapFrame. Nested interrupts use the interrupt stack as well. This
+    /// feature uses mscratch to store the old stack pointer. While not in
+    /// an interrupt, mscratch must be zero.
+    interrupt_stack: struct {
+        enable: bool = false,
+        size: usize = 4096,
+    } = .{},
 };
 
 pub const Exception = enum(u5) {
@@ -359,8 +364,7 @@ fn init_interrupts() void {
         .base = @intCast(@intFromPtr(&_vector_table) >> 2),
     });
 
-    // if is interrupt_stack is enabled
-    if (interrupt_stack_size != null) {
+    if (interrupt_stack_options.enable) {
         csr.mscratch.write_raw(0);
     }
 }
@@ -384,8 +388,8 @@ pub const TrapFrame = extern struct {
     a7: usize,
 };
 
-const interrupt_stack_size = microzig.options.cpu.interrupt_stack_size;
-pub var interrupt_stack: [std.mem.alignForward(usize, interrupt_stack_size orelse 0, 16)]u8 align(16) = undefined;
+/// Statically allocated interrupt stack of the requested size.
+pub var interrupt_stack: [std.mem.alignForward(usize, interrupt_stack_options.size, 16)]u8 align(16) = undefined;
 
 fn _vector_table() align(256) linksection(".ram_vectors") callconv(.naked) void {
     const interrupt_jump_asm, const interrupt_c_stubs_asm = comptime blk: {
@@ -458,7 +462,7 @@ fn _vector_table() align(256) linksection(".ram_vectors") callconv(.naked) void 
         \\    mv a0, sp       # Pass a pointer to TrapFrame to the handler function
         \\    mv a1, ra       # Save address of handler function
         \\
-        ++ (if (interrupt_stack_size != null)
+        ++ (if (interrupt_stack_options.enable)
             // switch to interrupt stack if not nested
             \\    csrr t0, mscratch
             \\    bnez t0, 1f
@@ -498,7 +502,7 @@ fn _vector_table() align(256) linksection(".ram_vectors") callconv(.naked) void 
         \\    mret
 
     :
-    : [interrupt_stack_top] "i" (if (interrupt_stack_size != null)
+    : [interrupt_stack_top] "i" (if (interrupt_stack_options.enable)
         interrupt_stack[interrupt_stack.len..].ptr
     else {}),
     );

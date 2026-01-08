@@ -3,7 +3,7 @@ const microzig = @import("microzig");
 
 pub const esp_image = @import("esp_image");
 
-pub const RTOS = @import("hal/RTOS.zig");
+pub const rtos = @import("hal/rtos.zig");
 pub const cache = @import("hal/cache.zig");
 pub const clocks = @import("hal/clocks.zig");
 pub const compatibility = @import("hal/compatibility.zig");
@@ -33,7 +33,7 @@ pub const HAL_Options = struct {
         secure_version: u32 = 0,
         version: []const u8 = "0.0.0",
     } = .{},
-    rtos: RTOS.Options = .{},
+    rtos: rtos.Options = .{},
     radio: radio.Options = .{},
 };
 
@@ -57,6 +57,10 @@ pub fn init_sequence(clock_cfg: clocks.Config) void {
     system.init();
 
     time.init();
+
+    if (microzig.options.hal.rtos.enable) {
+        rtos.init();
+    }
 }
 
 // NOTE: might be esp32c3 specific only + temporary until timers hal.
